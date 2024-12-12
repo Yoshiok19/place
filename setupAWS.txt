@@ -1,0 +1,91 @@
+1. VPC Setup
+Default VPC starts with 3 subnets in 3 availability zones and an internet gateway.
+Create a public NAT Gateway and place it on one of the subnets
+Create one route table with rows:
+- 0.0.0.0/0     	  ->      Internet Gateway address
+- 172.31.0.0/16 ->      local
+Create another route table with rows:
+- 0.0.0.0/0         ->      NAT Gateway address
+- 172.31.0.0/16 ->      local
+    
+Associate two subnets to the private route table (the route table with the NAT gateway mapping). These two subnets are private because the route table does not contain a mapping to the internet gateway
+Associate one subnet to the public route table (the route table with the Internet gateway mapping). This subnet is public
+Notes:
+The NAT Gateway should be placed on the public subnet
+2. Create Redis OSS on VPC through Elasticache (Add all 3 availability zones)
+3. Create WebSocket API on API Gateway and add routes
+Create $connect route
+Create $disconnect route
+Create sendMessage route
+4. Create lambdas on VPC
+Create connect (placev2handler) lambda:
+Lives on VPC (On the two private subnets)
+Triggered by $connect route
+Requires Redis and SQS
+Stores connectionId in clients set
+Sends message to SQS to trigger a lambda to send the current canvas
+Create disconnect (placev2disconnect) lambda 
+Lives on VPC (On the two private subnets)
+Triggered by $disconnect route
+Requires Redis
+Removes disconnected connectionId from clients set in Redis
+Create sendMessage lambda (For handling pixel updates)
+Lives on VPC (On the two private subnets)
+Triggered by sendMessage route
+Requires Redis and SQS
+Receives pixel data from event[“body”][“data”]
+Appends pixel data to the history of points in the Redis cache
+Updates pixel data for the current canvas in the Redis cache
+Sends message to SQS to trigger a broadcast to all connected clients
+Create broadcast lambda (For broadcasting pixel updates to connected clients)
+Lives on VPC
+Triggered by SQS
+Requires Redis and Gateway
+Gets all connected clients from Redis cache, loops through all connectionIds and sends the updated pixel data through gateway.post_to_connection
+If any connectionIds fail we remove the client from Redis
+Create initializeConnection lambda (For sending current canvas to connected client)
+Lives on VPC
+Triggered by SQS
+Requires Redis and Gateway
+Gets the connectionId from the SQS message and gets the current canvas from the Redis cache. Sends the current canvas to the client through the gateway
+Create save lambda (For persistent storage)
+Lives on VPC
+Triggered by EventBridge (Every minute)
+Requires Redis and DynamoDB
+Retrieves the history of points from Redis, saves them in the DynamoDB and then removes what was saved
+Retrieves the current canvas from Redis and saves it in the DynamoDB
+Each pixel is stored as individual rows in DynamoDB
+For canvas, rows are overwritten in the DB to update the current canvas
+
+5. SQS Setup
+Setup place2InitializeQueue, which will be an ordered queue with no encryption
+Set initializeConnection as a lambda trigger to consume connectionId events from place2InitializeQueue SQS. 
+Setup requestQueue which will be an ordered queue with no encryption
+Set placev2broadcast as a lambda trigger to consume events from requestQueue SQS. 
+
+6. Database Setup
+Create two tables via DynamoDB Client on AWS, one for storing the most recently used of each pixel, one for storing the history of pixel changes.
+Set up the table classes according to DynamoDB resource documentation.
+Add GET and POST functions, optimized for batching
+Write lambda function for dumping and clearing Redis history cache and updating MRU pixels on DynamoDB with the Redis MRU pixels cache.
+Set lambda function to run on an interval such that POSTs are written in batches.
+
+7. EventBridge Setup
+Create a recurring EventBridge schedule to trigger the “save” lambda function
+Select rate based schedule and set interval time to 1 minute
+Configure schedule to invoke the “save” lambda function
+Set retry to desired number
+
+Notes:
+Configure the integration request for each route ($connect, $disconnect, sendMessage) to point to the appropriate lambda function
+Check that each lambda has the appropriate trigger (The current API Gateway route)
+Make sure each Lambda has a role with the required permissions set (AWSLambdaVPCAccess, ApiGatewayAccess, etc.)
+Put each lambda on the 2 private subnets (See VPC Setup)
+
+Resources:
+- https://aws.amazon.com/blogs/aws/new-vpc-endpoint-for-amazon-s3/
+- https://redis-py.readthedocs.io/en/stable/
+- https://docs.aws.amazon.com/vpc/latest/userguide/vpc-igw-internet-access.html
+- https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html#vpc-internet
+- https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/Welcome.html
+
